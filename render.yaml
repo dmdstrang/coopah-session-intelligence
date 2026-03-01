@@ -11,6 +11,9 @@ services:
         value: production
       - key: JWT_SECRET
         generateValue: true
-      # Add in Render Dashboard: STRAVA_CLIENT_ID, STRAVA_CLIENT_SECRET, OPENAI_API_KEY (optional)
-      # Then set STRAVA_REDIRECT_URI = https://<your-service>.onrender.com/api/strava/callback
-      # and FRONTEND_ORIGIN = https://<your-service>.onrender.com
+      # In Render Dashboard → Environment, add:
+      #   STRAVA_CLIENT_ID, STRAVA_CLIENT_SECRET (from https://www.strava.com/settings/api)
+      #   STRAVA_REDIRECT_URI = https://<YOUR-RENDER-URL>/api/strava/callback
+      #   FRONTEND_ORIGIN = https://<YOUR-RENDER-URL>
+      # Then in Strava app settings (same page), set "Authorization Callback Domain" to
+      #   <YOUR-RENDER-URL> only (e.g. coopah-session-intelligence-xxxx.onrender.com, no https://)
