@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, type Request, type Response } from "express";
 import { eq } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { stravaCredentials } from "../db/schema.js";
@@ -81,7 +81,7 @@ stravaRouter.get("/auth-url", (req: AuthRequest, res) => {
 });
 
 /** GET /api/strava/callback?code=...&state=userId — OAuth callback; store tokens for user in state */
-stravaRouter.get("/callback", async (req, res) => {
+stravaRouter.get("/callback", async (req: Request, res: Response) => {
   const config = getStravaConfig();
   const code = req.query.code as string | undefined;
   const state = req.query.state as string | undefined;
@@ -129,14 +129,14 @@ stravaRouter.get("/callback", async (req, res) => {
 });
 
 /** GET /api/strava/status — whether we have credentials for this user */
-stravaRouter.get("/status", async (req: AuthRequest, res) => {
+stravaRouter.get("/status", async (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
   const [row] = await db.select().from(stravaCredentials).where(eq(stravaCredentials.userId, userId)).limit(1);
   res.json({ connected: !!row });
 });
 
 /** GET /api/strava/activities — last 10 activities */
-stravaRouter.get("/activities", async (req: AuthRequest, res) => {
+stravaRouter.get("/activities", async (req: AuthRequest, res: Response) => {
   try {
     const { accessToken } = await getValidAccessToken(req.userId!);
     const activities = await getActivities(accessToken);
@@ -151,8 +151,8 @@ stravaRouter.get("/activities", async (req: AuthRequest, res) => {
 });
 
 /** GET /api/strava/activities/:id — activity with metadata, laps, streams */
-stravaRouter.get("/activities/:id", async (req: AuthRequest, res) => {
-  const id = req.params.id;
+stravaRouter.get("/activities/:id", async (req: AuthRequest, res: Response) => {
+  const id = (req as Request<{ id: string }>).params.id;
   try {
     const { accessToken } = await getValidAccessToken(req.userId!);
     const [activity, laps, streams] = await Promise.all([
