@@ -37,6 +37,7 @@ export async function exchangeCode(params: {
     client_secret: params.clientSecret,
     code: params.code,
     grant_type: "authorization_code",
+    ...(params.redirectUri ? { redirect_uri: params.redirectUri } : {}),
   });
   const res = await fetch(STRAVA_OAUTH_TOKEN, {
     method: "POST",

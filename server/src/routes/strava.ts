@@ -69,7 +69,7 @@ stravaRouter.get("/auth-url", (req: AuthRequest, res) => {
   const userId = req.userId!;
   if (!config.clientId) {
     return res.status(500).json({
-      error: "Strava client ID not configured. Add STRAVA_CLIENT_ID and STRAVA_CLIENT_SECRET in server/.env",
+      error: "Strava not configured. Set STRAVA_CLIENT_ID and STRAVA_CLIENT_SECRET in server/.env (local) or in Render Dashboard → Environment (production).",
     });
   }
   const url = getAuthUrl({
@@ -90,7 +90,9 @@ stravaRouter.get("/callback", async (req: Request, res: Response) => {
     return res.redirect(`${config.frontendOrigin}?strava=denied`);
   }
   if (!code) {
-    return res.redirect(`${config.frontendOrigin}?strava=error`);
+    const errParam = req.query.error ? `&reason=${encodeURIComponent(req.query.error as string)}` : "";
+    console.warn("[Strava callback] No code in callback, query:", req.query);
+    return res.redirect(`${config.frontendOrigin}?strava=error${errParam}`);
   }
   const userId = state ? parseInt(state, 10) : 1;
   if (Number.isNaN(userId) || userId < 1) {
@@ -124,7 +126,8 @@ stravaRouter.get("/callback", async (req: Request, res: Response) => {
     res.redirect(`${config.frontendOrigin}?strava=connected`);
   } catch (e) {
     console.error("Strava callback error:", e);
-    res.redirect(`${config.frontendOrigin}?strava=error`);
+    const msg = e instanceof Error ? e.message : String(e);
+    res.redirect(`${config.frontendOrigin}?strava=error&reason=${encodeURIComponent(msg.slice(0, 100))}`);
   }
 });
 
