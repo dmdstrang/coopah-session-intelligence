@@ -1,0 +1,30 @@
+/* PRD: dark only. Background #0F1115, Cards #161A22, Borders #222733 */
+:root {
+  --bg: #0F1115;
+  --card: #161A22;
+  --border: #222733;
+  --text: #FFFFFF;
+  --text-secondary: #9BA3AF;
+  --green: #1DB954;
+  --amber: #F5A623;
+  --red: #FF4D4F;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, sans-serif;
+  min-height: 100vh;
+}
+
+#root {
+  max-width: 480px;
+  margin: 0 auto;
+  padding: 16px;
+  min-height: 100vh;
+}

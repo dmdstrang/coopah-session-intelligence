@@ -1,0 +1,20 @@
+CREATE TABLE `fitness_snapshots` (
+	`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+	`session_score_id` integer NOT NULL,
+	`estimated_threshold_sec_per_mile` integer NOT NULL,
+	`t5k_sec` integer NOT NULL,
+	`t10k_sec` integer NOT NULL,
+	`thalf_sec` integer NOT NULL,
+	`tmarathon_sec` integer NOT NULL,
+	`trend_drift` integer,
+	`trend_z5` integer,
+	`trend_exec` integer,
+	`fatigue_index` integer,
+	`fatigue_state` text,
+	`execution_consistency_index` integer,
+	`hr_stability_index` integer,
+	`prediction_confidence` integer,
+	`fitness_trend_state` text,
+	`sessions_count` integer NOT NULL,
+	`created_at` integer NOT NULL
+);

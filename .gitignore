@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Env and secrets (never commit)
+.env
+.env.local
+!.env.example
+server/.env
+server/.env.local
+
+# Build output
+server/dist/
+client/dist/
+
+# SQLite DB (optional: remove this line if you want to commit a seed DB)
+server/data/
+
+# OS and editor
+.DS_Store
+*.log
+.idea/
+.vscode/

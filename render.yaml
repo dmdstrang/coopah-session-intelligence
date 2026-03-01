@@ -1,0 +1,16 @@
+# Render Blueprint — one-click deploy from GitHub
+# Docs: https://render.com/docs/infrastructure-as-code
+services:
+  - type: web
+    name: coopah-session-intelligence
+    runtime: node
+    buildCommand: npm install && npm run build
+    startCommand: npm run start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: JWT_SECRET
+        generateValue: true
+      # Add in Render Dashboard: STRAVA_CLIENT_ID, STRAVA_CLIENT_SECRET, OPENAI_API_KEY (optional)
+      # Then set STRAVA_REDIRECT_URI = https://<your-service>.onrender.com/api/strava/callback
+      # and FRONTEND_ORIGIN = https://<your-service>.onrender.com
