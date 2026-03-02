@@ -31,11 +31,11 @@ This document is the single source of truth for session scoring and FitnessState
 
 `ratio = total_work_duration_actual / total_work_duration_planned`
 
-- 0.98–1.02 → 20
-- 0.95–0.98 or 1.02–1.05 → 15
-- If ratio < 0.95: `volume_score = 15 * clamp((ratio - 0.85) / (0.95 - 0.85), 0, 1)`
-- If ratio > 1.05: `volume_score = 15 * clamp((1.15 - ratio) / (1.15 - 1.05), 0, 1)`
-- Then `volume_score = clamp(volume_score, 0, 20)`. No bonus for exceeding volume.
+Only score down if volume ≤98% or >150% of planned. Being slightly over (e.g. 102%) does not reduce the score.
+
+- If 0.98 < ratio ≤ 1.5 → 20 (full marks)
+- If ratio ≤ 0.98: `volume_score = 15 * clamp((ratio - 0.85) / (0.98 - 0.85), 0, 1)`, then clamp to 0–20
+- If ratio > 1.5: `volume_score = 20 * clamp((2.0 - ratio) / (2.0 - 1.5), 0, 1)`, then clamp to 0–20
 
 ### 2.3 Intensity Score (0–40)
 

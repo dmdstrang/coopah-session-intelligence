@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   BarChart,
   Bar,
@@ -10,6 +10,7 @@ import {
   LineChart,
   Line,
   CartesianGrid,
+  ReferenceArea,
 } from "recharts";
 import { parseJson } from "./api";
 import { useAuth } from "./Auth";
@@ -86,7 +87,7 @@ interface SessionListItem {
   createdAt: number;
 }
 
-interface AnalyseResult {
+export interface AnalyseResult {
   sessionScoreId?: number | null;
   totalScore: number;
   paceScore: number;
@@ -105,18 +106,48 @@ interface AnalyseResult {
   coachReview?: string;
   /** HR stream for session (downsampled). timeSec = elapsed sec, heartrate = bpm. */
   hrStreamForSession?: { timeSec: number[]; heartrate: number[] };
+  /** Work rep windows in seconds (for HR chart overlay). */
+  workPeriods?: { startSec: number; endSec: number }[];
+  /** How fatigue was calculated (for section 7 explanation). */
+  fatigueExplanation?: {
+    signalFromSession: number;
+    previousIndex: number;
+    driftBpm: number | null;
+    pctZ5Work: number | null;
+    driftNorm: number;
+    z5Norm: number;
+    execNorm: number;
+  };
 }
+
+const ACTIVITIES_INITIAL = 10;
 
 export function StravaSection({
   parsedPlanId = null,
   lastConfirmedPlan = null,
+  draftPlan = null,
+  viewingAnalysis = null,
+  onConsumeViewingAnalysis,
+  mode,
+  onBack,
+  onScoreComplete,
 }: {
   parsedPlanId?: number | null;
   lastConfirmedPlan?: ConfirmedPlan | null;
+  draftPlan?: ConfirmedPlan | null;
+  viewingAnalysis?: { result: AnalyseResult; stravaActivityId: number } | null;
+  onConsumeViewingAnalysis?: () => void;
+  mode?: "strava" | "analysis";
+  onBack?: () => void;
+  onScoreComplete?: (result: AnalyseResult, stravaActivityId: number) => void;
 }) {
+  // Use current draft (e.g. 5 work intervals) so rep count and API use latest plan even before re-confirm
+  const effectivePlan = draftPlan ?? lastConfirmedPlan;
   const auth = useAuth();
+  const analysisBlockRef = useRef<HTMLDivElement>(null);
   const [connected, setConnected] = useState<boolean | null>(null);
   const [activities, setActivities] = useState<StravaActivity[]>([]);
+  const [showAllActivities, setShowAllActivities] = useState(false);
   const [selectedActivityId, setSelectedActivityId] = useState<number | null>(null);
   const [activityLaps, setActivityLaps] = useState<ActivityLap[]>([]);
   const [loadingActivities, setLoadingActivities] = useState(false);
@@ -244,7 +275,7 @@ export function StravaSection({
   }, [analyseResult?.sessionScoreId]);
 
   const workRepCount =
-    (lastConfirmedPlan?.intervals?.filter((i) => i.type === "work").length ?? 0) ||
+    (effectivePlan?.intervals?.filter((i) => i.type === "work").length ?? 0) ||
     reconcileResult?.proposedMapping?.length ||
     0;
 
@@ -259,7 +290,7 @@ export function StravaSection({
         selectedLapIds?: number[];
         plan?: { sessionName?: string; intervals?: unknown[] };
       } = { parsedPlanId, activityId: selectedActivityId };
-      if (lastConfirmedPlan) body.plan = { sessionName: lastConfirmedPlan.sessionName, intervals: lastConfirmedPlan.intervals };
+      if (effectivePlan) body.plan = { sessionName: effectivePlan.sessionName, intervals: effectivePlan.intervals };
       const lapIds = manualLapIds?.length === workRepCount ? manualLapIds : reconcileResult?.selectedLapIds;
       if (lapIds?.length) body.selectedLapIds = lapIds;
       const res = await auth.apiFetch("/api/sessions/analyse", {
@@ -272,7 +303,8 @@ export function StravaSection({
         setError(data?.error ?? "Analysis failed");
         return;
       }
-      setAnalyseResult(data);
+      setAnalyseResult(data ?? null);
+      if (data && selectedActivityId != null) onScoreComplete?.(data, selectedActivityId);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Analysis failed");
     } finally {
@@ -291,7 +323,7 @@ export function StravaSection({
         parsedPlanId,
         activityId: selectedActivityId,
       };
-      if (lastConfirmedPlan) reconcileBody.plan = { sessionName: lastConfirmedPlan.sessionName, intervals: lastConfirmedPlan.intervals };
+      if (effectivePlan) reconcileBody.plan = { sessionName: effectivePlan.sessionName, intervals: effectivePlan.intervals };
       const res = await auth.apiFetch("/api/sessions/reconcile", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -348,6 +380,17 @@ export function StravaSection({
     }
   };
 
+  // When parent (e.g. PreviousResults) passes a result to show, display it and scroll to analysis
+  useEffect(() => {
+    if (!viewingAnalysis) return;
+    setAnalyseResult(viewingAnalysis.result);
+    setCoachReview(viewingAnalysis.result.coachReview ?? null);
+    setSelectedActivityId(viewingAnalysis.stravaActivityId);
+    onConsumeViewingAnalysis?.();
+    const t = setTimeout(() => analysisBlockRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
+    return () => clearTimeout(t);
+  }, [viewingAnalysis, onConsumeViewingAnalysis]);
+
   const handleReanalyseSession = async (sessionId: number) => {
     setReanalysingId(sessionId);
     setError(null);
@@ -362,7 +405,10 @@ export function StravaSection({
       if (data) {
         setAnalyseResult(data);
         setCoachReview(data.coachReview ?? null);
+        const session = sessionsList.find((s) => s.id === sessionId);
+        if (session) setSelectedActivityId(session.stravaActivityId);
         await fetchSessions();
+        setTimeout(() => analysisBlockRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Reanalyse failed");
@@ -371,43 +417,51 @@ export function StravaSection({
     }
   };
 
-  if (connected === null) {
+  const effectiveAnalyseResult = analyseResult ?? viewingAnalysis?.result;
+
+  function BackButtonInline() {
+    if (!onBack) return null;
     return (
-      <div
+      <button
+        type="button"
+        onClick={onBack}
         style={{
-          background: "var(--card)",
-          border: "1px solid var(--border)",
-          borderRadius: 8,
-          padding: 16,
-          marginTop: 24,
+          marginBottom: 12,
+          padding: "6px 0",
+          background: "none",
+          border: "none",
+          color: "var(--text-secondary)",
+          cursor: "pointer",
+          fontSize: 14,
         }}
       >
-        <p style={{ color: "var(--text-secondary)", margin: 0 }}>
-          Checking Strava…
-        </p>
-      </div>
+        ← Back
+      </button>
     );
   }
 
+  // Don't block on loading: show connect UI so new users always see the button (status may be slow or fail)
+
+  const activitiesToShow = showAllActivities ? activities : activities.slice(0, ACTIVITIES_INITIAL);
+  const hasMoreActivities = activities.length > ACTIVITIES_INITIAL;
+
   return (
-    <div
-      style={{
-        background: "var(--card)",
-        border: "1px solid var(--border)",
-        borderRadius: 8,
-        padding: 16,
-        marginTop: 24,
-      }}
-    >
-      <h2 style={{ fontSize: "1rem", marginTop: 0, marginBottom: 12 }}>
-        Strava
-      </h2>
-      {error && (
-        <p style={{ color: "var(--red)", marginBottom: 12, fontSize: 14 }}>
-          {error}
-        </p>
+    <div style={{ background: mode === "analysis" ? "transparent" : "var(--card)", border: mode === "analysis" ? "none" : "1px solid var(--border)", borderRadius: 8, padding: mode === "analysis" ? 0 : 16, marginTop: (mode === "strava" || mode === "analysis") ? 0 : 24 }}>
+      {(mode === "strava" || mode === "analysis") && onBack && <BackButtonInline />}
+      {mode === "analysis" && !effectiveAnalyseResult && (
+        <p style={{ color: "var(--text-secondary)", fontSize: 14 }}>No analysis to show. Score a session or open one from Previous results.</p>
       )}
-      {!connected ? (
+      {mode !== "analysis" && (
+        <>
+          <h2 style={{ fontSize: "1rem", marginTop: 0, marginBottom: 12 }}>
+            Strava
+          </h2>
+          {error && (
+            <p style={{ color: "var(--red)", marginBottom: 12, fontSize: 14 }}>
+              {error}
+            </p>
+          )}
+          {!connected ? (
         <div>
           <p style={{ color: "var(--text-secondary)", marginBottom: 12, fontSize: 14 }}>
             Connect your Strava account to select activities for session
@@ -445,7 +499,7 @@ export function StravaSection({
           ) : (
             <div>
               <p style={{ color: "var(--text-secondary)", fontSize: 14, marginBottom: 8 }}>
-                Last 30 activities — tap one to select for session analysis:
+                Tap one to select for session analysis:
               </p>
               <ul
                 style={{
@@ -454,7 +508,7 @@ export function StravaSection({
                   margin: 0,
                 }}
               >
-                {activities.map((a) => {
+                {activitiesToShow.map((a) => {
                   const isSelected = selectedActivityId === a.id;
                   return (
                     <li
@@ -495,6 +549,25 @@ export function StravaSection({
                   );
                 })}
               </ul>
+              {hasMoreActivities && !showAllActivities && (
+                <button
+                  type="button"
+                  onClick={() => setShowAllActivities(true)}
+                  style={{
+                    width: "100%",
+                    padding: "10px 0",
+                    marginTop: 4,
+                    background: "var(--bg)",
+                    border: "1px solid var(--border)",
+                    borderRadius: 6,
+                    color: "var(--text-secondary)",
+                    cursor: "pointer",
+                    fontSize: 14,
+                  }}
+                >
+                  See more ({activities.length - ACTIVITIES_INITIAL} more)
+                </button>
+              )}
               {selectedActivityId && (
                 <div style={{ marginTop: 12 }}>
                   <p style={{ color: "var(--green)", fontSize: 14, marginBottom: 8 }}>
@@ -627,29 +700,39 @@ export function StravaSection({
                           </div>
                         </>
                       )}
-                      {analyseResult && (
-                        <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 16 }}>
+                    </>
+                  ) : null}
+                </div>
+              )}
+                </div>
+              )}
+                </div>
+              )}
+        </>
+      )}
+                      {effectiveAnalyseResult && (mode !== "strava") ? (
+                        <div ref={analysisBlockRef} style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 16 }}>
                           {/* Block 1: Session Score */}
                           <div style={{ padding: 16, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8 }}>
                             {blockHeading("1. Session quality")}
-                            <p style={{ margin: 0, fontSize: 48, fontWeight: 700, color: "var(--text)" }}>{analyseResult.totalScore}</p>
+                            <p style={{ margin: 0, fontSize: 48, fontWeight: 700, color: "var(--text)" }}>{effectiveAnalyseResult.totalScore}</p>
                             <div style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap", fontSize: 14, color: "var(--text-secondary)" }}>
-                              <span>Execution {analyseResult.paceScore}/40</span>
-                              <span>Volume {analyseResult.volumeScore}/20</span>
-                              <span>Intensity {analyseResult.intensityScore}/40</span>
+                              <span>Execution {effectiveAnalyseResult.paceScore}/40</span>
+                              <span>Volume {effectiveAnalyseResult.volumeScore}/20</span>
+                              <span>Intensity {effectiveAnalyseResult.intensityScore}/40</span>
                             </div>
                             <div style={{ marginTop: 8, height: 8, borderRadius: 4, overflow: "hidden", display: "flex", background: "var(--border)" }}>
-                              <div style={{ width: `${analyseResult.paceScore}%`, background: "var(--green)" }} />
-                              <div style={{ width: `${analyseResult.volumeScore}%`, background: "var(--amber)" }} />
-                              <div style={{ width: `${analyseResult.intensityScore}%`, background: "#6366f1" }} />
+                              <div style={{ width: `${effectiveAnalyseResult.paceScore}%`, background: "var(--green)" }} />
+                              <div style={{ width: `${effectiveAnalyseResult.volumeScore}%`, background: "var(--amber)" }} />
+                              <div style={{ width: `${effectiveAnalyseResult.intensityScore}%`, background: "#6366f1" }} />
                             </div>
                             <div style={{ marginTop: 12, height: 140 }}>
                               <ResponsiveContainer width="100%" height="100%">
                                 <BarChart
                                   data={[
-                                    { name: "Execution", score: analyseResult.paceScore, fill: "var(--green)" },
-                                    { name: "Volume", score: analyseResult.volumeScore, fill: "var(--amber)" },
-                                    { name: "Intensity", score: analyseResult.intensityScore, fill: "#6366f1" },
+                                    { name: "Execution", score: effectiveAnalyseResult.paceScore, fill: "var(--green)" },
+                                    { name: "Volume", score: effectiveAnalyseResult.volumeScore, fill: "var(--amber)" },
+                                    { name: "Intensity", score: effectiveAnalyseResult.intensityScore, fill: "#6366f1" },
                                   ]}
                                   margin={{ top: 8, right: 8, left: 0, bottom: 4 }}
                                 >
@@ -664,40 +747,43 @@ export function StravaSection({
                                 </BarChart>
                               </ResponsiveContainer>
                             </div>
-                            {analyseResult.diagnostics && (
+                            {effectiveAnalyseResult.diagnostics && (
                               <p style={{ margin: "12px 0 0 0", fontSize: 12, color: "var(--text-secondary)" }}>
-                                Volume ratio: {(analyseResult.diagnostics.volumeRatio * 100).toFixed(1)}%. Execution mean deviation: {(analyseResult.diagnostics.executionMeanDeviation * 100).toFixed(2)}% (under 6% = full marks).
+                                Volume ratio: {(effectiveAnalyseResult.diagnostics.volumeRatio * 100).toFixed(1)}%. Execution mean deviation: {(effectiveAnalyseResult.diagnostics.executionMeanDeviation * 100).toFixed(2)}% (under 6% = full marks).
                               </p>
                             )}
-                            {analyseResult.sessionThresholdSecPerMile != null && analyseResult.sessionThresholdSecPerMile > 0 && (
+                            {effectiveAnalyseResult.sessionThresholdSecPerMile != null && effectiveAnalyseResult.sessionThresholdSecPerMile > 0 && (
                               <p style={{ margin: "8px 0 0 0", fontSize: 12, color: "var(--text-secondary)" }}>
-                                Session threshold: <strong style={{ color: "var(--text)" }}>{formatPaceSecPerMile(analyseResult.sessionThresholdSecPerMile)}</strong>
+                                Session threshold: <strong style={{ color: "var(--text)" }}>{formatPaceSecPerMile(effectiveAnalyseResult.sessionThresholdSecPerMile)}</strong>
                               </p>
                             )}
+                            <div style={{ marginTop: 16, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+                              <p style={{ margin: "0 0 8px 0", fontSize: 12, fontWeight: 600, color: "var(--text-secondary)" }}>How your score was calculated</p>
+                              <ul style={{ margin: 0, paddingLeft: 20, fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.6 }}>
+                                <li><strong style={{ color: "var(--green)" }}>Execution ({effectiveAnalyseResult.paceScore}/40)</strong> — Pace vs target: duration-weighted average deviation (under 6% = full marks), minus penalties for inconsistent reps and fading in the second half.</li>
+                                <li><strong style={{ color: "var(--amber)" }}>Volume ({effectiveAnalyseResult.volumeScore}/20)</strong> — Actual work duration vs planned. 98–102% = full marks; outside that band the score scales down.</li>
+                                <li><strong style={{ color: "#6366f1" }}>Intensity ({effectiveAnalyseResult.intensityScore}/40)</strong> — HR during work: reward for Z3+Z4 ≥70%, penalties for too much Z5, too much Z2, or HR drift first→last rep. No HR data = 0 for this part.</li>
+                              </ul>
+                            </div>
                           </div>
 
-                          {/* Block 2: Fitness Impact */}
-                          {analyseResult.fitnessState && (
-                            <div style={{ padding: 16, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8 }}>
-                              {blockHeading("2. Fitness impact")}
-                              <p style={{ margin: 0, fontSize: 14 }}>
-                                Fatigue: <strong>{(analyseResult.fitnessState.fatigueIndex * 100).toFixed(0)}%</strong> — {analyseResult.fitnessState.fatigueState}
-                              </p>
-                              <p style={{ margin: "4px 0 0 0", fontSize: 12, color: "var(--text-secondary)" }}>
-                                Bands: 0–30% Low, 31–55% Stable, 56–75% Building, 76–100% High.
-                              </p>
-                            </div>
-                          )}
+                          {/* Block 2: Coach Review */}
+                          <div style={{ padding: 16, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8 }}>
+                            {blockHeading("2. Coach review")}
+                            <p style={{ margin: 0, fontSize: 13, color: "var(--text)", whiteSpace: "pre-wrap", lineHeight: 1.5 }}>
+                              {effectiveAnalyseResult.coachReview ?? coachReview ?? "Loading…"}
+                            </p>
+                          </div>
 
                           {/* Block 3: Pace Execution */}
-                          {analyseResult.workSplits && analyseResult.workSplits.length > 0 && (
+                          {effectiveAnalyseResult.workSplits && effectiveAnalyseResult.workSplits.length > 0 && (
                             <div style={{ padding: 16, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8 }}>
                               {blockHeading("3. Pace execution")}
                               <p style={{ margin: "0 0 8px 0", fontSize: 12, color: "var(--text-secondary)" }}>Pace vs target (min/mi) by rep</p>
                               <div style={{ height: 220, marginBottom: 12 }}>
                                 <ResponsiveContainer width="100%" height="100%">
                                   <BarChart
-                                    data={analyseResult.workSplits.map((s) => ({
+                                    data={effectiveAnalyseResult.workSplits.map((s) => ({
                                       rep: `Rep ${s.repIndex}`,
                                       target: s.plannedPaceSecPerMile / 60,
                                       actual: s.actualPaceSecPerMile / 60,
@@ -727,7 +813,7 @@ export function StravaSection({
                                     </tr>
                                   </thead>
                                   <tbody>
-                                    {analyseResult.workSplits.map((s) => (
+                                    {effectiveAnalyseResult.workSplits.map((s) => (
                                       <tr key={s.repIndex} style={{ borderBottom: "1px solid var(--border)" }}>
                                         <td style={{ padding: "6px 8px 6px 0" }}>Rep {s.repIndex}</td>
                                         <td style={{ padding: "6px 8px" }}>{formatDuration(s.plannedDurationSec)} @ {formatPaceSecPerMile(s.plannedPaceSecPerMile)}</td>
@@ -744,19 +830,28 @@ export function StravaSection({
                           {/* Block 4: HR Profile */}
                           <div style={{ padding: 16, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8 }}>
                             {blockHeading("4. HR profile")}
-                            {analyseResult.hrStreamForSession && analyseResult.hrStreamForSession.timeSec.length > 0 ? (
+                            {effectiveAnalyseResult.hrStreamForSession && effectiveAnalyseResult.hrStreamForSession.timeSec.length > 0 ? (
                               <>
-                                <p style={{ margin: "0 0 8px 0", fontSize: 12, color: "var(--text-secondary)" }}>Heart rate across the session</p>
+                                <p style={{ margin: "0 0 8px 0", fontSize: 12, color: "var(--text-secondary)" }}>Heart rate across the session (shaded = work intervals)</p>
                                 <div style={{ height: 200, marginBottom: 12 }}>
                                   <ResponsiveContainer width="100%" height="100%">
                                     <LineChart
-                                      data={analyseResult.hrStreamForSession.timeSec.map((t, i) => ({
+                                      data={effectiveAnalyseResult.hrStreamForSession.timeSec.map((t, i) => ({
                                         min: Math.round(t / 60 * 10) / 10,
-                                        bpm: analyseResult.hrStreamForSession!.heartrate[i],
+                                        bpm: effectiveAnalyseResult.hrStreamForSession!.heartrate[i],
                                       }))}
                                       margin={{ top: 8, right: 8, left: 0, bottom: 4 }}
                                     >
                                       <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                                      {effectiveAnalyseResult.workPeriods?.map((wp, i) => (
+                                        <ReferenceArea
+                                          key={i}
+                                          x1={Math.round((wp.startSec / 60) * 10) / 10}
+                                          x2={Math.round((wp.endSec / 60) * 10) / 10}
+                                          fill="var(--green)"
+                                          fillOpacity={0.25}
+                                        />
+                                      ))}
                                       <XAxis dataKey="min" tick={{ fontSize: 10, fill: "var(--text-secondary)" }} unit=" min" />
                                       <YAxis tick={{ fontSize: 11, fill: "var(--text-secondary)" }} width={32} unit=" bpm" />
                                       <Tooltip contentStyle={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 6 }} formatter={(v: number) => [v, "HR"]} labelFormatter={(min) => `${min} min`} />
@@ -765,15 +860,15 @@ export function StravaSection({
                                   </ResponsiveContainer>
                                 </div>
                                 <p style={{ margin: 0, fontSize: 12, color: "var(--text-secondary)" }}>
-                                  {analyseResult.intensityDiagnostics ? (
-                                    <>Work zones: {formatPct(analyseResult.intensityDiagnostics.pct_z2_work)} Z2, {formatPct(analyseResult.intensityDiagnostics.pct_z3_work)} Z3, {formatPct(analyseResult.intensityDiagnostics.pct_z4_work)} Z4, {formatPct(analyseResult.intensityDiagnostics.pct_z5_work)} Z5. Drift first→last rep: {analyseResult.intensityDiagnostics.drift_bpm >= 0 ? "+" : ""}{analyseResult.intensityDiagnostics.drift_bpm.toFixed(0)} bpm.</>
+                                  {effectiveAnalyseResult.intensityDiagnostics ? (
+                                    <>Work zones: {formatPct(effectiveAnalyseResult.intensityDiagnostics.pct_z2_work)} Z2, {formatPct(effectiveAnalyseResult.intensityDiagnostics.pct_z3_work)} Z3, {formatPct(effectiveAnalyseResult.intensityDiagnostics.pct_z4_work)} Z4, {formatPct(effectiveAnalyseResult.intensityDiagnostics.pct_z5_work)} Z5. Drift first→last rep: {effectiveAnalyseResult.intensityDiagnostics.drift_bpm >= 0 ? "+" : ""}{effectiveAnalyseResult.intensityDiagnostics.drift_bpm.toFixed(0)} bpm.</>
                                   ) : null}
                                 </p>
                               </>
                             ) : (
                               <p style={{ margin: 0, fontSize: 12, color: "var(--text-secondary)" }}>
-                                {analyseResult.intensityDiagnostics ? (
-                                  <>Your work was {formatPct(analyseResult.intensityDiagnostics.pct_z2_work)} Z2, {formatPct(analyseResult.intensityDiagnostics.pct_z3_work)} Z3, {formatPct(analyseResult.intensityDiagnostics.pct_z4_work)} Z4, {formatPct(analyseResult.intensityDiagnostics.pct_z5_work)} Z5. HR drifted {analyseResult.intensityDiagnostics.drift_bpm >= 0 ? "+" : ""}{analyseResult.intensityDiagnostics.drift_bpm.toFixed(0)} bpm first→last rep.</>
+                                {effectiveAnalyseResult.intensityDiagnostics ? (
+                                  <>Your work was {formatPct(effectiveAnalyseResult.intensityDiagnostics.pct_z2_work)} Z2, {formatPct(effectiveAnalyseResult.intensityDiagnostics.pct_z3_work)} Z3, {formatPct(effectiveAnalyseResult.intensityDiagnostics.pct_z4_work)} Z4, {formatPct(effectiveAnalyseResult.intensityDiagnostics.pct_z5_work)} Z5. HR drifted {effectiveAnalyseResult.intensityDiagnostics.drift_bpm >= 0 ? "+" : ""}{effectiveAnalyseResult.intensityDiagnostics.drift_bpm.toFixed(0)} bpm first→last rep.</>
                                 ) : (
                                   <>No HR data for this activity. Intensity score not included.</>
                                 )}
@@ -848,42 +943,74 @@ export function StravaSection({
                           )}
 
                           {/* Block 6: Current Fitness */}
-                          {analyseResult.fitnessState && (
+                          {effectiveAnalyseResult.fitnessState && (
                             <div style={{ padding: 16, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8 }}>
                               {blockHeading("6. Current fitness")}
-                              <p style={{ margin: 0, fontSize: 13 }}>
-                                Estimated threshold: <strong>{formatPaceSecPerMile(analyseResult.fitnessState.estimatedThresholdSecPerMile)}</strong>
+                              <p style={{ margin: "0 0 12px 0", fontSize: 13 }}>
+                                Threshold: <strong>{formatPaceSecPerMile(effectiveAnalyseResult.fitnessState.estimatedThresholdSecPerMile)}</strong>
+                                <span style={{ marginLeft: 12, color: "var(--text-secondary)", fontWeight: 400 }}>
+                                  {(effectiveAnalyseResult.fitnessState.predictionConfidence * 100).toFixed(0)}% confidence · {effectiveAnalyseResult.fitnessState.sessionsCount} session{effectiveAnalyseResult.fitnessState.sessionsCount !== 1 ? "s" : ""} · {effectiveAnalyseResult.fitnessState.fitnessTrendState}
+                                </span>
                               </p>
-                              <p style={{ margin: "4px 0 0 0", fontSize: 12, color: "var(--text-secondary)" }}>
-                                Predicted: 5K {formatTime(analyseResult.fitnessState.t5kSec)} · 10K {formatTime(analyseResult.fitnessState.t10kSec)} · Half {formatTime(analyseResult.fitnessState.thalfSec)} · Marathon {formatTime(analyseResult.fitnessState.tmarathonSec)}
-                              </p>
-                              <p style={{ margin: "4px 0 0 0", fontSize: 12 }}>
-                                Confidence {(analyseResult.fitnessState.predictionConfidence * 100).toFixed(0)}% · Trend: {analyseResult.fitnessState.fitnessTrendState} · {analyseResult.fitnessState.sessionsCount} session{analyseResult.fitnessState.sessionsCount !== 1 ? "s" : ""}
-                              </p>
+                              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))", gap: 12 }}>
+                                {[
+                                  { label: "5K", sec: effectiveAnalyseResult.fitnessState.t5kSec },
+                                  { label: "10K", sec: effectiveAnalyseResult.fitnessState.t10kSec },
+                                  { label: "Half", sec: effectiveAnalyseResult.fitnessState.thalfSec },
+                                  { label: "Marathon", sec: effectiveAnalyseResult.fitnessState.tmarathonSec },
+                                ].map(({ label, sec }) => (
+                                  <div
+                                    key={label}
+                                    style={{
+                                      padding: "16px 12px",
+                                      background: "var(--card)",
+                                      border: "1px solid var(--border)",
+                                      borderRadius: 8,
+                                      textAlign: "center",
+                                    }}
+                                  >
+                                    <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 4 }}>{label}</div>
+                                    <div style={{ fontSize: 22, fontWeight: 700, color: "var(--text)" }}>{formatTime(sec)}</div>
+                                  </div>
+                                ))}
+                              </div>
                             </div>
                           )}
 
-                          {/* Block 7: Coach Review */}
-                          <div style={{ padding: 16, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8 }}>
-                            {blockHeading("7. Coach review")}
-                            <p style={{ margin: 0, fontSize: 13, color: "var(--text)", whiteSpace: "pre-wrap", lineHeight: 1.5 }}>
-                              {analyseResult.coachReview ?? coachReview ?? "Loading…"}
-                            </p>
-                          </div>
+                          {/* Block 7: Fitness Impact — fatigue with personalised explanation */}
+                          {effectiveAnalyseResult.fitnessState && (
+                            <div style={{ padding: 16, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8 }}>
+                              {blockHeading("7. Fitness impact")}
+                              <p style={{ margin: 0, fontSize: 14 }}>
+                                Fatigue: <strong>{(effectiveAnalyseResult.fitnessState.fatigueIndex * 100).toFixed(0)}%</strong> — {effectiveAnalyseResult.fitnessState.fatigueState}
+                              </p>
+                              <p style={{ margin: "4px 0 0 0", fontSize: 12, color: "var(--text-secondary)" }}>
+                                Bands: 0–30% Low, 31–55% Stable, 56–75% Building, 76–100% High.
+                              </p>
+                              {effectiveAnalyseResult.fatigueExplanation && (
+                                <div style={{ marginTop: 16, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+                                  <p style={{ margin: "0 0 8px 0", fontSize: 12, fontWeight: 600, color: "var(--text-secondary)" }}>How your fatigue was calculated</p>
+                                  <p style={{ margin: 0, fontSize: 13, color: "var(--text)", lineHeight: 1.6 }}>
+                                    This session contributed <strong>{((effectiveAnalyseResult.fatigueExplanation.signalFromSession) * 100).toFixed(0)}%</strong> to your fatigue signal, from three parts (blended 35% / 25% / 40%):
+                                  </p>
+                                  <ul style={{ margin: "8px 0 0 0", paddingLeft: 20, fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.6 }}>
+                                    <li><strong>HR drift</strong> — first rep vs last rep: {effectiveAnalyseResult.fatigueExplanation.driftBpm != null ? `${effectiveAnalyseResult.fatigueExplanation.driftBpm >= 0 ? "+" : ""}${effectiveAnalyseResult.fatigueExplanation.driftBpm.toFixed(0)} bpm` : "no HR"} ({(effectiveAnalyseResult.fatigueExplanation.driftNorm * 100).toFixed(0)}% of this session’s signal).</li>
+                                    <li><strong>Time in Z5</strong> — {effectiveAnalyseResult.fatigueExplanation.pctZ5Work != null ? `${(effectiveAnalyseResult.fatigueExplanation.pctZ5Work * 100).toFixed(1)}%` : "no HR"} of work above threshold ({(effectiveAnalyseResult.fatigueExplanation.z5Norm * 100).toFixed(0)}% of signal).</li>
+                                    <li><strong>Execution shortfall</strong> — pace score {effectiveAnalyseResult.paceScore}/40 ({(effectiveAnalyseResult.fatigueExplanation.execNorm * 100).toFixed(0)}% of signal).</li>
+                                  </ul>
+                                  <p style={{ margin: "8px 0 0 0", fontSize: 12, color: "var(--text-secondary)" }}>
+                                    Your running fatigue index is smoothed: 75% previous ({(effectiveAnalyseResult.fatigueExplanation.previousIndex * 100).toFixed(0)}%) + 25% this session → <strong>{(effectiveAnalyseResult.fitnessState.fatigueIndex * 100).toFixed(0)}%</strong>.
+                                  </p>
+                                </div>
+                              )}
+                            </div>
+                          )}
                         </div>
-                      )}
-                    </>
-                  ) : (
+                      ) : mode !== "analysis" ? (
                     <p style={{ color: "var(--text-secondary)", fontSize: 13, margin: 0 }}>
                       Confirm a session plan above (screenshots) to match laps and run analysis.
                     </p>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      )}
+                  ) : null}
     </div>
   );
 }

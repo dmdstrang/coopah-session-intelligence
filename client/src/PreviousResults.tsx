@@ -14,11 +14,19 @@ interface SessionListItem {
   sessionName?: string | null;
 }
 
-export function PreviousResults() {
+/** Reanalyse response shape (same as analyse). */
+type AnalyseResult = import("./StravaSection").AnalyseResult;
+
+export function PreviousResults({
+  onShowAnalysis,
+}: {
+  onShowAnalysis?: (result: AnalyseResult, stravaActivityId: number) => void;
+} = {}) {
   const auth = useAuth();
   const [sessionsList, setSessionsList] = useState<SessionListItem[]>([]);
   const [removingId, setRemovingId] = useState<number | null>(null);
   const [reanalysingId, setReanalysingId] = useState<number | null>(null);
+  const [viewingId, setViewingId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const fetchSessions = useCallback(async () => {
@@ -53,21 +61,42 @@ export function PreviousResults() {
     }
   };
 
-  const handleReanalyse = async (sessionId: number) => {
-    setReanalysingId(sessionId);
+  const handleReanalyse = async (s: SessionListItem) => {
+    setReanalysingId(s.id);
     setError(null);
     try {
-      const res = await auth.apiFetch(`/api/sessions/${sessionId}/reanalyse`, { method: "POST" });
+      const res = await auth.apiFetch(`/api/sessions/${s.id}/reanalyse`, { method: "POST" });
       if (!res.ok) {
         const data = await parseJson<{ error?: string }>(res);
         setError(data?.error ?? "Re-run failed");
         return;
       }
+      const data = await parseJson<AnalyseResult>(res);
       await fetchSessions();
+      if (data && onShowAnalysis) onShowAnalysis(data, s.stravaActivityId);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Re-run failed");
     } finally {
       setReanalysingId(null);
+    }
+  };
+
+  const handleView = async (s: SessionListItem) => {
+    setViewingId(s.id);
+    setError(null);
+    try {
+      const res = await auth.apiFetch(`/api/sessions/${s.id}/reanalyse`, { method: "POST" });
+      if (!res.ok) {
+        const data = await parseJson<{ error?: string }>(res);
+        setError(data?.error ?? "Failed to load analysis");
+        return;
+      }
+      const data = await parseJson<AnalyseResult>(res);
+      if (data && onShowAnalysis) onShowAnalysis(data, s.stravaActivityId);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load analysis");
+    } finally {
+      setViewingId(null);
     }
   };
 
@@ -114,7 +143,23 @@ export function PreviousResults() {
             <span style={{ display: "flex", gap: 6 }}>
               <button
                 type="button"
-                onClick={() => handleReanalyse(s.id)}
+                onClick={() => handleView(s)}
+                disabled={viewingId !== null}
+                style={{
+                  padding: "4px 10px",
+                  fontSize: 13,
+                  background: "var(--bg)",
+                  border: "1px solid var(--border)",
+                  borderRadius: 6,
+                  color: "var(--text)",
+                  cursor: viewingId !== null ? "not-allowed" : "pointer",
+                }}
+              >
+                {viewingId === s.id ? "…" : "View"}
+              </button>
+              <button
+                type="button"
+                onClick={() => handleReanalyse(s)}
                 disabled={reanalysingId !== null}
                 style={{
                   padding: "4px 10px",

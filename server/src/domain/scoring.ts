@@ -86,8 +86,8 @@ function executionScore(
 }
 
 /**
- * Volume score (0–20). Spec §2.2.
- * 0.98–1.02 → 20; 0.95–0.98 or 1.02–1.05 → 15; else linear scale between 0.85 and 1.15.
+ * Volume score (0–20). Only score down if volume ≤98% or >150% of planned.
+ * Band 98% < ratio ≤ 150% → full marks (20). Below 98% or above 150% → linear penalty.
  */
 function volumeScore(
   plannedTotalSeconds: number,
@@ -95,18 +95,16 @@ function volumeScore(
 ): number {
   if (plannedTotalSeconds <= 0) return 0;
   const ratio = actualTotalSeconds / plannedTotalSeconds;
-  if (ratio >= 0.98 && ratio <= 1.02) return 20;
-  if (ratio >= 0.95 && ratio < 0.98) return 15;
-  if (ratio > 1.02 && ratio <= 1.05) return 15;
-  if (ratio < 0.95) {
-    const s = 15 * clamp((ratio - 0.85) / (0.95 - 0.85), 0, 1);
+  // Full marks when above 98% and at or below 150% of planned (e.g. 102% is fine)
+  if (ratio > 0.98 && ratio <= 1.5) return 20;
+  if (ratio <= 0.98) {
+    // Under volume: linear 0.85 → 0, 0.98 → 15
+    const s = 15 * clamp((ratio - 0.85) / (0.98 - 0.85), 0, 1);
     return Math.round(clamp(s, 0, 20));
   }
-  if (ratio > 1.05) {
-    const s = 15 * clamp((1.15 - ratio) / (1.15 - 1.05), 0, 1);
-    return Math.round(clamp(s, 0, 20));
-  }
-  return 15;
+  // Over volume (>150%): linear 1.5 → 20, 2.0+ → 0
+  const s = 20 * clamp((2.0 - ratio) / (2.0 - 1.5), 0, 1);
+  return Math.round(clamp(s, 0, 20));
 }
 
 /**

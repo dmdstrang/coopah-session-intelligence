@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useRef, useState, useEffect } from "react";
 import { parseJson } from "./api";
 import { useAuth } from "./Auth";
 
@@ -71,7 +71,10 @@ function intervalLabel(inv: Interval, idx: number): string {
 
 interface ScreenshotSectionProps {
   onPlanConfirmed?: (id: number | null, plan?: { sessionName: string; intervals: Interval[] }) => void;
+  onDraftChange?: (plan: { sessionName: string; intervals: Interval[] } | null) => void;
   initialParsedPlanId?: number | null;
+  onGoToSelectActivity?: () => void;
+  hasConfirmedPlan?: boolean;
 }
 
 const BLANK_MANUAL_PLAN: ParsedPlan = {
@@ -81,7 +84,7 @@ const BLANK_MANUAL_PLAN: ParsedPlan = {
   confidence: 100,
 };
 
-export function ScreenshotSection({ onPlanConfirmed, initialParsedPlanId = null }: ScreenshotSectionProps) {
+export function ScreenshotSection({ onPlanConfirmed, onDraftChange, initialParsedPlanId = null, onGoToSelectActivity, hasConfirmedPlan = false }: ScreenshotSectionProps) {
   const auth = useAuth();
   const [addMode, setAddMode] = useState<null | "manual" | "screenshot">(null);
   const [files, setFiles] = useState<File[]>([]);
@@ -95,6 +98,11 @@ export function ScreenshotSection({ onPlanConfirmed, initialParsedPlanId = null 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const addMoreInputRef = useRef<HTMLInputElement>(null);
   const replaceInputRef = useRef<HTMLInputElement>(null);
+
+  // Report current draft so Strava section can show correct number of reps to match (e.g. 5) before re-confirm
+  useEffect(() => {
+    onDraftChange?.(parsed ? { sessionName: parsed.sessionName, intervals: parsed.intervals } : null);
+  }, [parsed, onDraftChange]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const chosen = Array.from(e.target.files ?? []);
@@ -162,10 +170,12 @@ export function ScreenshotSection({ onPlanConfirmed, initialParsedPlanId = null 
     setConfirming(true);
     setError(null);
     try {
+      const currentPlanId = parsedPlanId ?? initialParsedPlanId ?? null;
       const res = await auth.apiFetch("/api/plans/confirm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          ...(currentPlanId != null && { parsedPlanId: currentPlanId }),
           sessionName: parsed.sessionName,
           coachMessage: parsed.coachMessage,
           intervals: parsed.intervals,
@@ -290,7 +300,12 @@ export function ScreenshotSection({ onPlanConfirmed, initialParsedPlanId = null 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 16 }}>
             <button
               type="button"
-              onClick={() => setParsed({ ...BLANK_MANUAL_PLAN })}
+              onClick={() => {
+                setParsed({ ...BLANK_MANUAL_PLAN });
+                setParsedPlanId(null);
+                setAddMode("manual");
+                onPlanConfirmed?.(null, undefined);
+              }}
               style={{
                 minHeight: 120,
                 padding: 20,
@@ -436,7 +451,29 @@ export function ScreenshotSection({ onPlanConfirmed, initialParsedPlanId = null 
             <p style={{ color: "var(--text-secondary)", fontSize: 14, margin: 0 }}>
               Confirm or edit the plan below. All intervals are shown; scoring uses work intervals only.
             </p>
-            <div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <button
+                type="button"
+                onClick={() => {
+                  setParsed(null);
+                  setParsedPlanId(null);
+                  setAddMode(null);
+                  setFiles([]);
+                  onPlanConfirmed?.(null, undefined);
+                  setError(null);
+                }}
+                style={{
+                  padding: "6px 12px",
+                  background: "var(--bg)",
+                  border: "1px solid var(--border)",
+                  borderRadius: 6,
+                  color: "var(--text)",
+                  cursor: "pointer",
+                  fontSize: 14,
+                }}
+              >
+                New plan
+              </button>
               <input
                 ref={replaceInputRef}
                 type="file"
@@ -458,7 +495,7 @@ export function ScreenshotSection({ onPlanConfirmed, initialParsedPlanId = null 
                   fontSize: 14,
                 }}
               >
-                Add new
+                Add new (screenshots)
               </button>
             </div>
           </div>
@@ -608,26 +645,45 @@ export function ScreenshotSection({ onPlanConfirmed, initialParsedPlanId = null 
           <p style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 12 }}>
             Analysis confidence: {parsed.confidence}%
           </p>
-          {(parsedPlanId ?? initialParsedPlanId) ? (
-            <p style={{ color: "var(--green)", fontSize: 14 }}>
+          {(parsedPlanId ?? initialParsedPlanId) && (
+            <p style={{ color: "var(--green)", fontSize: 14, marginBottom: 12 }}>
               Plan saved (ID: {parsedPlanId ?? initialParsedPlanId}). You can select a Strava activity and run analysis next.
             </p>
-          ) : (
+          )}
+          <button
+            type="button"
+            onClick={handleConfirm}
+            disabled={confirming}
+            style={{
+              padding: "10px 20px",
+              background: "var(--green)",
+              border: "none",
+              borderRadius: 6,
+              color: "var(--bg)",
+              fontWeight: 600,
+              cursor: confirming ? "not-allowed" : "pointer",
+            }}
+          >
+            {confirming ? "Saving…" : (parsedPlanId ?? initialParsedPlanId) ? "Re-confirm plan" : "Confirm plan"}
+          </button>
+          {hasConfirmedPlan && onGoToSelectActivity && (
             <button
               type="button"
-              onClick={handleConfirm}
-              disabled={confirming}
+              onClick={onGoToSelectActivity}
               style={{
-                padding: "10px 20px",
-                background: "var(--green)",
-                border: "none",
-                borderRadius: 6,
-                color: "var(--bg)",
+                marginTop: 12,
+                width: "100%",
+                padding: "12px 20px",
+                background: "var(--bg)",
+                border: "2px solid var(--green)",
+                borderRadius: 8,
+                color: "var(--green)",
                 fontWeight: 600,
-                cursor: confirming ? "not-allowed" : "pointer",
+                cursor: "pointer",
+                fontSize: 15,
               }}
             >
-              {confirming ? "Saving…" : "Confirm plan"}
+              Next: Select activity →
             </button>
           )}
         </div>
@@ -640,7 +696,12 @@ export function ScreenshotSection({ onPlanConfirmed, initialParsedPlanId = null 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 16 }}>
             <button
               type="button"
-              onClick={() => setParsed({ ...BLANK_MANUAL_PLAN })}
+              onClick={() => {
+                setParsed({ ...BLANK_MANUAL_PLAN });
+                setParsedPlanId(null);
+                setAddMode("manual");
+                onPlanConfirmed?.(null, undefined);
+              }}
               style={{
                 minHeight: 100,
                 padding: 16,

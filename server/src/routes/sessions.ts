@@ -11,7 +11,7 @@ import { intensityInputsFromStreams } from "../domain/hr-zones.js";
 import { speedToPaceSecPerMile } from "../domain/reconcile-reps.js";
 import { logScoringCalculations } from "../lib/scoring-logger.js";
 import { computeSessionThreshold } from "../domain/threshold.js";
-import { fatigueSignalFromSession } from "../domain/fatigue.js";
+import { fatigueSignalFromSession, fatigueSignalWithComponents } from "../domain/fatigue.js";
 import { computeNextFitnessSnapshot } from "../domain/fitness-state.js";
 import { generateCoachNarrative } from "../lib/coach-narrative.js";
 import { goalPaceSecPerMile, type GoalDistance } from "../domain/goal.js";
@@ -220,6 +220,7 @@ sessionsRouter.post("/analyse", async (req: AuthRequest, res) => {
 
     let intensityInputs: IntensityInputs | null = null;
     let hrStreamForSession: { timeSec: number[]; heartrate: number[] } | undefined;
+    let workPeriods: { startSec: number; endSec: number }[] | undefined;
     if (activity.has_heartrate) {
       try {
         const streams = await getActivityStreams(activityId, accessToken);
@@ -228,13 +229,21 @@ sessionsRouter.post("/analyse", async (req: AuthRequest, res) => {
         if (timeStream?.data?.length && hrStream?.data?.length) {
           const byId = new Map(laps.map((l) => [l.id, l]));
           const selectedFull = selectedLapIds.map((id) => byId.get(id)).filter(Boolean);
-          const lapsInTimeOrder = ([...selectedFull] as { lap_index: number; elapsed_time: number; average_heartrate?: number }[])
+          const lapsInTimeOrder = ([...selectedFull] as { id: number; lap_index: number; elapsed_time: number; average_heartrate?: number }[])
             .sort((a, b) => a.lap_index - b.lap_index);
           intensityInputs = intensityInputsFromStreams(
             timeStream.data,
             hrStream.data,
             lapsInTimeOrder
           );
+          // Offset = time (sec) from activity start to first work lap (e.g. after warmup laps)
+          const allLapsSorted = [...laps].sort((a, b) => a.lap_index - b.lap_index);
+          const firstWorkLapIndex = allLapsSorted.findIndex((l) => l.id === selectedLapIds[0]);
+          const offsetSec = firstWorkLapIndex <= 0 ? 0 : allLapsSorted.slice(0, firstWorkLapIndex).reduce((s, l) => s + l.elapsed_time, 0);
+          workPeriods = lapsInTimeOrder.map((lap, i) => {
+            const startSec = offsetSec + lapsInTimeOrder.slice(0, i).reduce((s, l) => s + l.elapsed_time, 0);
+            return { startSec, endSec: startSec + lap.elapsed_time };
+          });
           const maxPoints = 350;
           const timeData = timeStream.data;
           const hrData = hrStream.data;
@@ -310,6 +319,7 @@ sessionsRouter.post("/analyse", async (req: AuthRequest, res) => {
       .returning();
 
     const sessionScoreId = insertedScore?.id;
+    let previousFatigueIndex: number | null = null;
     if (sessionScoreId != null) {
       const fatigueSignal = fatigueSignalFromSession(
         scoreResult.paceScore,
@@ -337,6 +347,7 @@ sessionsRouter.post("/analyse", async (req: AuthRequest, res) => {
             t5kSec: latestSnapshot.t5kSec,
           }
         : null;
+      previousFatigueIndex = previous?.fatigueIndex ?? null;
       const nextSnapshot = computeNextFitnessSnapshot({
         sessionScoreId,
         sessionThresholdSecPerMile,
@@ -441,6 +452,26 @@ sessionsRouter.post("/analyse", async (req: AuthRequest, res) => {
       fitnessState: fitnessStateForResponse,
       coachReview,
       hrStreamForSession,
+      workPeriods,
+      fatigueExplanation:
+        fitnessStateForResponse != null
+          ? (() => {
+              const comp = fatigueSignalWithComponents(
+                scoreResult.paceScore,
+                intensityInputs?.drift_bpm ?? null,
+                intensityInputs?.pct_z5_work ?? null
+              );
+              return {
+                signalFromSession: comp.signal,
+                previousIndex: previousFatigueIndex ?? 0,
+                driftBpm: comp.driftBpm,
+                pctZ5Work: comp.pctZ5Work,
+                driftNorm: comp.driftNorm,
+                z5Norm: comp.z5Norm,
+                execNorm: comp.execNorm,
+              };
+            })()
+          : undefined,
     });
   } catch (e) {
     if (e instanceof Error && e.message === "Not connected to Strava") {
@@ -632,6 +663,8 @@ sessionsRouter.post("/:id/reanalyse", async (req: AuthRequest, res) => {
     }
 
     let intensityInputs: IntensityInputs | null = null;
+    let hrStreamForSession: { timeSec: number[]; heartrate: number[] } | undefined;
+    let workPeriods: { startSec: number; endSec: number }[] | undefined;
     if (activity.has_heartrate) {
       try {
         const streams = await getActivityStreams(activityId, accessToken);
@@ -640,32 +673,48 @@ sessionsRouter.post("/:id/reanalyse", async (req: AuthRequest, res) => {
         if (timeStream?.data?.length && hrStream?.data?.length) {
           const byId = new Map(laps.map((l) => [l.id, l]));
           const selectedFull = lapIdsForStreams.map((sid) => byId.get(sid)).filter(Boolean);
-          const lapsInTimeOrder = ([...selectedFull] as { lap_index: number; elapsed_time: number; average_heartrate?: number }[]).sort((a, b) => a.lap_index - b.lap_index);
+          const lapsInTimeOrder = ([...selectedFull] as { id: number; lap_index: number; elapsed_time: number; average_heartrate?: number }[]).sort((a, b) => a.lap_index - b.lap_index);
           intensityInputs = intensityInputsFromStreams(timeStream.data, hrStream.data, lapsInTimeOrder);
+          const allLapsSorted = [...laps].sort((a, b) => a.lap_index - b.lap_index);
+          const firstWorkLapIndex = allLapsSorted.findIndex((l) => l.id === lapIdsForStreams[0]);
+          const offsetSec = firstWorkLapIndex <= 0 ? 0 : allLapsSorted.slice(0, firstWorkLapIndex).reduce((s, l) => s + l.elapsed_time, 0);
+          workPeriods = lapsInTimeOrder.map((lap, i) => {
+            const startSec = offsetSec + lapsInTimeOrder.slice(0, i).reduce((s, l) => s + l.elapsed_time, 0);
+            return { startSec, endSec: startSec + lap.elapsed_time };
+          });
+          const maxPoints = 350;
+          const timeData = timeStream.data;
+          const hrData = hrStream.data;
+          if (timeData.length === hrData.length && timeData.length > 0) {
+            const step = timeData.length <= maxPoints ? 1 : Math.ceil(timeData.length / maxPoints);
+            hrStreamForSession = {
+              timeSec: timeData.filter((_: number, i: number) => i % step === 0) as number[],
+              heartrate: hrData.filter((_: number, i: number) => i % step === 0) as number[],
+            };
+          }
         }
       } catch {
         // no HR
       }
     }
 
+    const sessionThresholdSecPerMile = computeSessionThreshold(selectedLapsInOrder, intensityInputs);
+    const scoreResult = computeSessionScore(plannedForScoring, selectedLapsInOrder, intensityInputs);
+    const perRepDeviationRe = scoreResult.breakdown?.pace?.perRepDeviation ?? [];
     const workSplits = selectedLapsInOrder.map((lap, i) => {
       const planned = plannedForScoring[i];
       const paceSecPerMile = lap.average_speed > 0 ? speedToPaceSecPerMile(lap.average_speed) : 0;
       const target = planned?.targetPaceSecPerMile ?? 360;
-      const delta = paceSecPerMile - target;
       return {
         repIndex: i + 1,
+        lapId: lapIdsForStreams[i],
         plannedDurationSec: planned?.durationSeconds ?? 0,
         actualDurationSec: lap.moving_time,
-        targetPaceSecPerMile: target,
+        plannedPaceSecPerMile: target,
         actualPaceSecPerMile: paceSecPerMile,
-        deltaSecPerMile: delta,
-        averageHeartrate: lap.average_heartrate ?? null,
+        deviationPct: (perRepDeviationRe[i] ?? 0) * 100,
       };
     });
-
-    const sessionThresholdSecPerMile = computeSessionThreshold(selectedLapsInOrder, intensityInputs);
-    const scoreResult = computeSessionScore(plannedForScoring, selectedLapsInOrder, intensityInputs);
     logScoringCalculations(plannedForScoring, selectedLapsInOrder, scoreResult, activityId);
 
     await db
@@ -760,14 +809,13 @@ sessionsRouter.post("/:id/reanalyse", async (req: AuthRequest, res) => {
             drift_bpm: intensityInputs.drift_bpm,
           }
         : undefined;
-    const perRepDeviation = scoreResult.breakdown?.pace?.perRepDeviation ?? [];
-    const coachWorkSplits = workSplits.map((w, i) => ({
+    const coachWorkSplits = workSplits.map((w) => ({
       repIndex: w.repIndex,
       plannedDurationSec: w.plannedDurationSec,
-      plannedPaceSecPerMile: w.targetPaceSecPerMile,
+      plannedPaceSecPerMile: w.plannedPaceSecPerMile,
       actualDurationSec: w.actualDurationSec,
       actualPaceSecPerMile: w.actualPaceSecPerMile,
-      deviationPct: (perRepDeviation[i] ?? 0) * 100,
+      deviationPct: w.deviationPct,
     }));
     const [goalRowRe] = await db
       .select()
@@ -805,6 +853,12 @@ sessionsRouter.post("/:id/reanalyse", async (req: AuthRequest, res) => {
       { raceGoal: raceGoalRe, sessionName: plan.sessionName ?? undefined, sessionThresholdSecPerMile }
     );
 
+    const previousFatigueRe = latestSnapshot != null && latestSnapshot.fatigueIndex != null ? (latestSnapshot.fatigueIndex as number) / 100 : 0;
+    const fatigueCompRe = fatigueSignalWithComponents(
+      scoreResult.paceScore,
+      intensityDiagnostics?.drift_bpm ?? null,
+      intensityDiagnostics?.pct_z5_work ?? null
+    );
     res.json({
       sessionScoreId: id,
       totalScore: scoreResult.totalScore,
@@ -818,6 +872,17 @@ sessionsRouter.post("/:id/reanalyse", async (req: AuthRequest, res) => {
       sessionThresholdSecPerMile,
       fitnessState: fitnessStateForResponse,
       coachReview,
+      hrStreamForSession,
+      workPeriods,
+      fatigueExplanation: {
+        signalFromSession: fatigueCompRe.signal,
+        previousIndex: previousFatigueRe,
+        driftBpm: fatigueCompRe.driftBpm,
+        pctZ5Work: fatigueCompRe.pctZ5Work,
+        driftNorm: fatigueCompRe.driftNorm,
+        z5Norm: fatigueCompRe.z5Norm,
+        execNorm: fatigueCompRe.execNorm,
+      },
     });
   } catch (e) {
     if (e instanceof Error && e.message === "Not connected to Strava") {

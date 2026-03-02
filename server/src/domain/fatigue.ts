@@ -38,6 +38,25 @@ export function fatigueSignalFromSession(
   return 0.35 * d + 0.25 * z + 0.4 * e;
 }
 
+/** Return signal and components for user-facing fatigue explanation. */
+export function fatigueSignalWithComponents(
+  paceScore: number,
+  driftBpm?: number | null,
+  pctZ5Work?: number | null
+): { signal: number; driftNorm: number; z5Norm: number; execNorm: number; driftBpm: number | null; pctZ5Work: number | null } {
+  const d = driftBpm != null ? driftNorm(driftBpm) : 0;
+  const z = pctZ5Work != null ? z5Norm(pctZ5Work) : 0;
+  const e = execNorm(paceScore);
+  return {
+    signal: 0.35 * d + 0.25 * z + 0.4 * e,
+    driftNorm: d,
+    z5Norm: z,
+    execNorm: e,
+    driftBpm: driftBpm ?? null,
+    pctZ5Work: pctZ5Work ?? null,
+  };
+}
+
 /** Exponential smoothing: newTrend = old * (1 - alpha) + current * alpha. */
 export function smoothTrend(oldTrend: number, current: number, alpha: number = TREND_ALPHA): number {
   return oldTrend * (1 - alpha) + current * alpha;

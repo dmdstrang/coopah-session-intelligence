@@ -1,5 +1,6 @@
 import { Router } from "express";
 import multer from "multer";
+import { eq, and } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { parsedPlans } from "../db/schema.js";
 import type { AuthRequest } from "../middleware/auth.js";
@@ -76,11 +77,11 @@ plansRouter.post("/analyse", upload.array("images", 5), async (req, res) => {
   }
 });
 
-/** POST /api/plans/confirm — save user-confirmed (or edited) plan with full intervals and coach message, return parsedPlanId */
+/** POST /api/plans/confirm — save or update user-confirmed plan. Send parsedPlanId to update in place, omit to create new. */
 plansRouter.post("/confirm", async (req: AuthRequest, res) => {
   try {
     const userId = req.userId!;
-    const body = req.body as { sessionName?: string; coachMessage?: string; intervals?: unknown[] };
+    const body = req.body as { parsedPlanId?: number; sessionName?: string; coachMessage?: string; intervals?: unknown[] };
     const sessionName = (body.sessionName ?? "Session").trim() || "Session";
     const coachMessage = typeof body.coachMessage === "string" ? body.coachMessage : "";
     const rawIntervals = Array.isArray(body.intervals) ? body.intervals : [];
@@ -97,6 +98,24 @@ plansRouter.post("/confirm", async (req: AuthRequest, res) => {
       }
       return invNorm;
     });
+
+    const existingId = typeof body.parsedPlanId === "number" ? body.parsedPlanId : null;
+    if (existingId != null) {
+      const [updated] = await db
+        .update(parsedPlans)
+        .set({
+          sessionName,
+          coachMessage,
+          workBlocks: JSON.stringify(intervals),
+          confidence: 100,
+        })
+        .where(and(eq(parsedPlans.id, existingId), eq(parsedPlans.userId, userId)))
+        .returning({ id: parsedPlans.id });
+      if (updated) {
+        return res.json({ parsedPlanId: updated.id });
+      }
+      // Plan not found or not owned by user — fall through to insert new
+    }
 
     const [inserted] = await db
       .insert(parsedPlans)
